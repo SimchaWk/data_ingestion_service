@@ -6,7 +6,7 @@ from app.config.local_files_config.local_files import GLOBAL_TERRORISM_CSV, SECO
 
 primary_df_columns: List[str] = [
     'iyear', 'imonth', 'iday', 'country_txt', 'region_txt',
-    'provstate', 'city', 'latitude', 'longitude',
+    'provstate', 'city', 'latitude', 'longitude', 'summary',
     'attacktype1_txt', 'attacktype2_txt', 'attacktype3_txt',
     'targtype1_txt', 'targsubtype1_txt', 'targtype2_txt',
     'targsubtype2_txt', 'targtype3_txt', 'targsubtype3_txt',

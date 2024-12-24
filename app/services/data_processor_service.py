@@ -2,9 +2,9 @@ from typing import List, Tuple, Callable, Any, Optional, Union, Dict, Generator
 import numpy as np
 import pandas as pd
 from functools import reduce
+import uuid
 
-from app.models.pydantic_model.event_record import EventRecord
-from app.repositories.local_files_repository import load_primary_csv, load_secondary_csv, save_dataframe_to_csv
+from app.repositories.local_files_repository import load_primary_csv, load_secondary_csv
 from app.services.rename_columns_service import rename_secondary_df_columns, rename_event_record_columns
 
 ESSENTIAL_COLUMNS: List[str] = [
@@ -16,7 +16,7 @@ ESSENTIAL_COLUMNS: List[str] = [
     'targtype1_txt', 'targsubtype1_txt', 'targtype2_txt',
     'targsubtype2_txt', 'targtype3_txt', 'targsubtype3_txt',
     'gname', 'gsubname', 'gname2', 'gsubname2', 'gname3', 'gsubname3',
-    'Description', 'data_source'
+    'summary', 'Description', 'data_source'
 ]
 
 
@@ -43,6 +43,7 @@ def convert_dates_primary_df(df: pd.DataFrame) -> pd.DataFrame:
 def convert_dates_secondary_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.insert(0, 'date', pd.to_datetime(df['Date'], format='%d-%b-%y'))
+    df['date'] = df['date'].apply(lambda x: x.replace(year=x.year - 100) if x.year > 2020 else x)
     return df
 
 
@@ -196,7 +197,112 @@ def create_data_processing_pipeline() -> pd.DataFrame:
     return normalize_data(result)
 
 
-def create_event_batches(events: List[EventRecord], batch_size: int = 10) -> Generator[List[Dict], None, None]:
-    event_dicts = [event.model_dump() for event in events]
-    for i in range(0, len(event_dicts), batch_size):
-        yield event_dicts[i:i + batch_size]
+def add_event_id(df):
+    df['event_id'] = df.apply(
+        lambda row: uuid.uuid4().hex, axis=1
+    )
+    return df
+
+
+def prepare_data_for_neo4j(df):
+    neo4j_data = {
+        "nodes": [],
+        "relationships": []
+    }
+
+    for _, row in df.iterrows():
+        event_node = {
+            "label": "Event",
+            "properties": {
+                "event_id": row["event_id"],
+                "event_date": row.get("event_date"),
+                "description": row.get("description"),
+                "num_killed": row.get("num_killed", 0),
+                "num_wounded": row.get("num_wounded", 0),
+                "data_source": row.get("data_source")
+            }
+        }
+        neo4j_data["nodes"].append(event_node)
+
+        if row.get("country"):
+            country_node = {
+                "label": "Country",
+                "properties": {"name": row["country"]}
+            }
+            neo4j_data["nodes"].append(country_node)
+
+            relationship = {
+                "from": event_node["properties"]["event_id"],
+                "to": country_node["properties"]["name"],
+                "type": "OCCURRED_IN",
+                "properties": {}
+            }
+            neo4j_data["relationships"].append(relationship)
+
+        if row.get("terror_group_name"):
+            terror_group_node = {
+                "label": "TerrorGroup",
+                "properties": {"name": row["terror_group_name"]}
+            }
+            neo4j_data["nodes"].append(terror_group_node)
+
+            relationship = {
+                "from": event_node["properties"]["event_id"],
+                "to": terror_group_node["properties"]["name"],
+                "type": "PERPETRATED_BY",
+                "properties": {}
+            }
+            neo4j_data["relationships"].append(relationship)
+
+        if row.get("city"):
+            city_node = {
+                "label": "City",
+                "properties": {"name": row["city"]}
+            }
+            neo4j_data["nodes"].append(city_node)
+
+            relationship = {
+                "from": event_node["properties"]["event_id"],
+                "to": city_node["properties"]["name"],
+                "type": "OCCURRED_IN_CITY",
+                "properties": {}
+            }
+            neo4j_data["relationships"].append(relationship)
+
+    neo4j_data["nodes"] = list({frozenset(node["properties"].items()): node for node in neo4j_data["nodes"]}.values())
+
+    return neo4j_data
+
+
+def generate_neo4j_cypher_script(neo4j_data):
+    script = []
+
+    for node in neo4j_data['nodes']:
+        label = node['label']
+        properties = ", ".join([
+            f"{key}: {f'\"{value.replace(chr(34), chr(39)).replace(chr(10), " ")}\"' if isinstance(value, str) else value}"
+            for key, value in node['properties'].items()
+            if value is not None and str(value).lower() != 'nan' and key != "description"
+        ])
+        script.append(f"MERGE (:{label} {{{properties}}})")
+
+    for relationship in neo4j_data['relationships']:
+        if 'from' not in relationship or 'to' not in relationship:
+            raise ValueError("Missing 'from' or 'to' field in relationship")
+
+        from_id = relationship['from']
+        to_id = relationship['to']
+        rel_type = relationship['type']
+        properties = ", ".join([
+            f"{key}: {f'\"{value}\"' if isinstance(value, str) else value}"
+            for key, value in relationship.get('properties', {}).items()
+            if value is not None
+        ])
+        properties_str = f" {{{properties}}}" if properties else ""
+
+        script.append(
+            f"MATCH (a {{event_id: \"{from_id}\"}}), (b {{name: \"{to_id}\"}})"
+            f" MERGE (a)-[:{rel_type}{properties_str}]->(b)"
+        )
+
+    return "\n".join(script)

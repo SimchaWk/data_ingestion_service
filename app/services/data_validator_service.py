@@ -1,45 +1,82 @@
-from typing import List, Dict
-import pandas as pd
+import json
+from typing import List
 from datetime import datetime
-from pydantic import ValidationError
-from app.models.pydantic_model.event_record import EventRecord
+import pandas as pd
+
+from app.models.terror_event import TerrorEvent
 
 
-def convert_row_to_dict(row: pd.Series) -> Dict:
-    return row.where(pd.notna(row), None).to_dict()
+def dataframe_to_pydantic_models(df: pd.DataFrame) -> List[TerrorEvent]:
+    attack_type_cols = ["attack_type_1", "attack_type_2", "attack_type_3"]
+    target_cols = [
+        "target_type_1", "target_subtype_1",
+        "target_type_2", "target_subtype_2",
+        "target_type_3", "target_subtype_3"
+    ]
+    terror_group_cols = [
+        "terror_group_name", "terror_group_subname",
+        "secondary_terror_group_name", "secondary_terror_group_subname",
+        "tertiary_terror_group_name", "tertiary_terror_group_subname"
+    ]
+
+    return [
+        TerrorEvent(
+            **{
+                key: row_dict[key]
+                for key in TerrorEvent.__annotations__
+                if key in (row_dict := row.dropna().to_dict())
+            },
+            attack_types=[
+                row[col] for col in attack_type_cols
+                if pd.notna(row.get(col))
+            ],
+            target_details=[
+                row[col] for col in target_cols
+                if pd.notna(row.get(col))
+            ],
+            terror_groups=[
+                row[col] for col in terror_group_cols
+                if pd.notna(row.get(col))
+            ]
+        )
+        for _, row in df.iterrows()
+    ]
 
 
-def parse_date(date_str: str) -> datetime:
+def prepare_models_for_kafka(models: List[TerrorEvent]) -> List[str]:
+    def convert_dates(data: dict) -> dict:
+        return {
+            key: parse_date(value).isoformat()
+            if isinstance(value, (datetime, str)) and is_valid_date(value)
+            else value
+            for key, value in data.items()
+        }
+
+    return [
+        json.dumps(
+            convert_dates(
+                model.model_dump(
+                    exclude_unset=True,
+                    exclude_none=True,
+                    exclude_defaults=True
+                )
+            )
+        )
+        for model in models
+    ]
+
+
+def is_valid_date(value: str | datetime) -> bool:
+    try:
+        parse_date(value)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_date(date_str: str | datetime) -> datetime:
     return (
         datetime.strptime(date_str, '%Y-%m-%d')
         if isinstance(date_str, str)
         else date_str
     )
-
-
-def validate_dataframe_to_events(df: pd.DataFrame) -> List[EventRecord]:
-    try:
-        validated_records = [
-            EventRecord(
-                **{
-                    **convert_row_to_dict(row),
-                    'event_date': parse_date(row.event_date)
-                }
-            )
-            for _, row in df.iterrows()
-            if pd.notna(row.event_date)  # Skip rows without date
-        ]
-
-        print(f"\nValidation Summary:")
-        print(f"Total records processed: {len(df)}")
-        print(f"Successfully validated: {len(validated_records)}")
-        print(f"Failed/Skipped: {len(df) - len(validated_records)}")
-
-        return validated_records
-
-    except Exception as e:
-        print(f"Error during validation: {str(e)}")
-        return []
-
-# Example usage:
-# validated_events = validate_dataframe_to_events(processed_df)

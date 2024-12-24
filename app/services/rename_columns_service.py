@@ -49,6 +49,7 @@ rename_event_record_columns = partial(
         "gsubname2": "secondary_terror_group_subname",
         "gname3": "tertiary_terror_group_name",
         "gsubname3": "tertiary_terror_group_subname",
+        "summary": "summary",
         "Description": "description",
         "data_source": "data_source"
     }
